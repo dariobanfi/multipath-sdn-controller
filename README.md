@@ -20,6 +20,6 @@ This component is used to do real-time measurements of the network. The con- tro
 
 ## Demo 
 Check out an visualization of the network benefits over here:
-[https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be]()
+[https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be](https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be)
 
 
