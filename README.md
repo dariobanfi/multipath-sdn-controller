@@ -17,4 +17,8 @@ This component is used to discover the SDN switches connected to the controller 
 It uses the network knowledge to compute multiple paths and push the resulting computation as  ow rules to the SDN switches. The rules can be a simple forward or a multipath forward, which splits the  ow packets over two or more routes. The controller might additionally set up packet reordering rules at a switch that
 - Network Measurement Component
 This component is used to do real-time measurements of the network. The con- troller keeps an estimate of the latency and bandwidth of the multiple paths that connect the SDN switches of the multipath topology. This data is used by the multipath routing component to compute forwarding tables which maximize the throughput between the nodes.
+## Demo 
+Check out an visualization of the network benefits over here:
+[https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be]()
+
 
