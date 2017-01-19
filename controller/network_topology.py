@@ -39,7 +39,7 @@ class NetworkTopology():
         self.pathfindinding_algo = Dijkstra(
             self.dpid_to_switch,
             controller.MIN_MULTIPATH_CAPACITY,
-            controller.UPDATE_FORWARDING_ON_TOPOLOGY_CHANGE_ONLY
+            controller.UPDATE_FORWARDING_ON_TOPOLOGY_CHANGE_ONLY,
         )
 
         # Dictionary containg multipath group id for a specific tuple
@@ -166,6 +166,8 @@ class NetworkTopology():
 
     def multipath_computation(self):
         edges = []
+        self.mp_config = {}
+
         for dpid, switch in self.dpid_to_switch.iteritems():
             #  Updating the capacity_maxflow variable which will be
             # modified by the algorithm with the realtime monitored capacity
@@ -176,6 +178,7 @@ class NetworkTopology():
                 edges.append(switch)
 
         # Calculate forwarding paths between all edges couples
+        logger.info('%s', self.dpid_to_switch)
         for edge_couple in itertools.permutations(edges, 2):
             self.calculate_multipath(edge_couple[0], edge_couple[1])
             self.create_flow_rules(edge_couple[0], edge_couple[1])
@@ -192,25 +195,40 @@ class NetworkTopology():
     def calculate_multipath(self, src, dst):
 
         paths = []
-
         previous_path = None
 
         while True:
             shortest_path = self.pathfindinding_algo.find_route(src, dst)
             if shortest_path and previous_path is None:
                 previous_path = shortest_path
+
+            # Limiting the number of paths in a multipath flow
             path_limit_reached = len(paths) + 1 > self.controller.MAX_PATHS_PER_MULTIPATH_FLOW
+
             path_delays = []
 
             if shortest_path is None:
+                logger.info('Path computation Algorithm terminates '
+                            '- NO MORE PATHS')
                 break
             else:
                 path_delays.append(shortest_path.latency())
                 path_delays.append(previous_path.latency())
-            if (self.mdi(path_delays) > self.controller.MDI_DROP_THRESHOLD or
-               path_limit_reached):
 
-                logger.info('Path computation Algorithm terminates')
+            # Stopping algorithm on MAX_HOP_DIFFERENCE
+            if self.controller.MAX_HOP_DIFFERENCE != -1 and (shortest_path.length() - previous_path.length()) > self.controller.MAX_HOP_DIFFERENCE:
+                logger.info('Path computation Algorithm terminates '
+                            ' - MAX HOP REACHED')
+                break
+
+            # Stopping algorithm on MDI_DROP_THRESHOLD
+            if (self.mdi(path_delays) > self.controller.MDI_DROP_THRESHOLD):
+                logger.info('Path computation Algorithm '
+                            'terminates - MDI_DROP_THRESHOLD REACHED')
+                break
+            if path_limit_reached is None:
+                logger.info('Path computation Algorithm terminates '
+                            '- PATH LIMIT REACHED')
                 break
 
             paths.append(shortest_path)
@@ -250,7 +268,7 @@ class NetworkTopology():
         '''
         n = random.randint(0, 2**32)
         while n in self.group_ids:
-            n = random.randint(0, 2**32)
+            n = random.randint(0, 2**32)  # lol
         return n
 
     def mdi(self, rules):
@@ -265,7 +283,12 @@ class NetworkTopology():
         '''
         max_delay_imbalance = 0
         for x, y in itertools.combinations(rules, 2):
-            max_delay_imbalance = max(max_delay_imbalance, abs((x/(x+y))-0.5))
+            try:
+                max_delay_imbalance = max(
+                    max_delay_imbalance, abs((x/(x+y))-0.5)
+                )
+            except ZeroDivisionError:
+                max_delay_imbalance = 0
 
         logger.info(
             'Max delay imbalance for %s is %f',
@@ -312,16 +335,16 @@ class NetworkTopology():
 
                 in_latencies.append(latency)
 
-                if len(out_rules) > 1:
-                    only_delays = [x[1][1] for x in out_rules.items()]
-                    max_delay_imbalance = self.mdi(
-                        only_delays)
-
                 group_id = None
                 group_new = False
 
                 # The switch is splitting traffic in multipath
                 if len(out_rules) > 1:
+                    only_delays = [x[1][1] for x in out_rules.items()]
+                    max_delay_imbalance = self.mdi(
+                        only_delays
+                    )
+
                     if (node, src, dst, in_port) not in self.multipath_group_ids:
                         group_new = True
                         self.multipath_group_ids[
@@ -362,12 +385,13 @@ class NetworkTopology():
                         bucket_action = [
                             ofp_parser.OFPActionOutput(port, 2000)
                         ]
-                        buckets.append(
-                            ofp_parser.OFPBucket(
-                                weight=bucket_weight,
-                                actions=bucket_action
+                        if(bucket_weight > 0):
+                            buckets.append(
+                                ofp_parser.OFPBucket(
+                                    weight=bucket_weight,
+                                    actions=bucket_action
+                                )
                             )
-                        )
                     # If GROUP Was new, we send a GROUP_ADD
                     if group_new:
                         logger.info(
@@ -375,6 +399,7 @@ class NetworkTopology():
                             '%d GROUP_ID %d out_rules %s',
                             node, src, dst, in_port, group_id, buckets
                         )
+                        logger.info('GROUP_ADD_BUCKETS %s', buckets)
 
                         req = ofp_parser.OFPGroupMod(
                             node.dp, ofp.OFPGC_ADD, ofp.OFPGT_SELECT, group_id,
@@ -394,6 +419,7 @@ class NetworkTopology():
                                     'GROUP_ID %d out_rules %s',
                                     node, src, dst, in_port, group_id, buckets
                                     )
+                        logger.info('GROUP_MOD_BUCKETS %s', buckets)
 
                     actions = [ofp_parser.OFPActionGroup(group_id)]
                     self.controller.add_flow(node.dp, self.PRIORITY_DEFAULT,
@@ -474,17 +500,22 @@ class NetworkTopology():
         l_ratio = latency / total_latency
 
         if max_delay_imbalance < 0.15:
-            c_var = 15
-            l_var = 10
+            c_var = 4
+            l_var = 0  # Latency is not impactful in such low levels
         elif max_delay_imbalance < 0.25:
-            c_var = 50
-            l_var = 33
+            c_var = 10
+            l_var = 8
         else:
             c_var = 150
             l_var = 50
 
         # More capacity more packets, more delay,less packets
-        outval = c_var*c_ratio + (l_var-l_var*l_ratio)
+        # outval = c_var*c_ratio + (l_var-l_var*l_ratio)
+
+        # Using only bandwidth for bucket weight because there needs to be some
+        # better formula otherwise with very low latencies the differences can
+        # be huge
+        outval = c_var*c_ratio
 
         logger.info('total_c: %f c_ratio: %f c: %f total_l: %f l_ratio: %f l:'
                     ' %f Bucket weight -> %d',
@@ -492,7 +523,7 @@ class NetworkTopology():
                     l_ratio, latency, outval
                     )
 
-        return outval
+        return int(outval)
 
     def modify_group(self, datapath, group_id, rules):
 
@@ -603,6 +634,7 @@ class Algorithm(object):
         self.min_trasverse_capacity = mintravcap
         self.update_forwarding_only_on_topology_change = topochangeupdate
 
+
     def find_route(self, src, dst):
         '''
             Sub-classes implement this method to calculate
@@ -695,9 +727,6 @@ class Dijkstra(Algorithm):
         self.route_last_update = time.time()
 
     def find_route(self, source, destination):
-
-        # Disabling because we need to recalculate paths every time for
-        # max flow regardless of topology changes
         logger.info('Searching route from %s to %s' % (source, destination))
         if self.update_forwarding_only_on_topology_change:
             if self.route_last_update < self.topology_last_update:
@@ -730,13 +759,15 @@ class Dijkstra(Algorithm):
 
         while True:
             x = pq.pop()
-            logger.debug('Popping %s : %f' % x)
+            logger.info('Popping %s : %f' % x)
             if x is None:
                 break
 
+            logger.info('%s', pq)
             switch, dist = x
 
             if not switch.has_peer_capacity():
+                logger.info('No peer capacity')
                 break
 
             if switch == destination:
@@ -758,9 +789,9 @@ class Dijkstra(Algorithm):
                                                       None)
 
                 if peer_switch is None or port.capacity_maxflow <= self.min_trasverse_capacity:
-                    logger.debug('Port %s cannot be traversed' % port)
+                    logger.info('Port %s cannot be traversed' % port)
                     continue
-                logger.debug('dist %s port latency %s  distance %s' %
+                logger.info('dist %s port latency %s  distance %s' %
                              (dist, port.latency, distance[peer_switch]))
 
                 if dist + port.latency < distance[peer_switch]:

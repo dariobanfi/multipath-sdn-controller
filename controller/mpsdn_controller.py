@@ -17,7 +17,7 @@ import time
 import traceback
 
 '''
-MPSDN Network Controller for a L2 OpenFlow network
+MPSDN Network Controller for a L2 network
 '''
 
 __author__ = 'Dario Banfi'
@@ -50,14 +50,33 @@ class MultipathController(app_manager.RyuApp):
         # Maximum delay imbalance threshold for not using multipath
         self.MDI_DROP_THRESHOLD = 0.25
 
+        # If this value is changed in the configuration, the path setup
+        # algorithm is halted if a path has more hops to the destination
+        # than this limit.
+        # If left -1, MDI_DROP will be used instead!
+        # It is suited for L2 Networks where link delays will be
+        # very similar
+        self.MAX_HOP_DIFFERENCE = -1
+
         # Minimum available capacity a path needs to be used in B/s
-        self.MIN_MULTIPATH_CAPACITY = 1000
+        self.MIN_MULTIPATH_CAPACITY = 100
 
         # Maximum paths allowed for a multipath flow
         self.MAX_PATHS_PER_MULTIPATH_FLOW = 2
 
         # Recalculates bucket only on addition or failures in the topology
         self.UPDATE_FORWARDING_ON_TOPOLOGY_CHANGE_ONLY = False
+
+        # Recomputes forwarding continuously reardless of congestion/failures
+        self.UPDATE_FORWARDING_CONTINOUSLY = False
+
+        # High priority
+        self.PRIORITY_PROBE_PACKETS = 65000
+
+        # Monitoring frequency for port stats.
+        self.MONITORING_PORT_STATS_FREQUENCY = 5
+
+        self.MONITORING_PORT_STATS = False
 
         # Used for REST APIs
         wsgi = kwargs['wsgi']
@@ -78,7 +97,7 @@ class MultipathController(app_manager.RyuApp):
         '''
 
         # Network monitor module
-        hub.spawn_after(3, self.network_monitor)
+        self.monitoringhub = hub.spawn(self.network_monitor)
 
         # Multipath computation module
         hub.spawn_after(5, self.multipath_computation)
@@ -115,16 +134,14 @@ class MultipathController(app_manager.RyuApp):
         datapath.send_msg(out)
 
     def set_edge_ports(self):
-
         # Setting the edge port [port connected to host networks]
         # of a switch to be the highest in number
+        # (In mininet it corresponds to the host port when they are
+        # added at the end of the topology creation)
         for dp_id, switch in self.topo_shape.dpid_to_switch.iteritems():
             switch.edge_port = len(switch.ports.keys())
 
     def multipath_computation(self):
-
-        self.set_edge_ports()
-
         while True:
             if not self.topo_shape.is_empty() and self.network_is_measured:
                 computation_start = time.time()
@@ -134,7 +151,37 @@ class MultipathController(app_manager.RyuApp):
                     'Multipath computation finished in %f seconds',
                     time.time() - computation_start
                 )
-            hub.sleep(10)
+
+            self.MONITORING_PORT_STATS = True
+            if self.UPDATE_FORWARDING_CONTINOUSLY:
+                hub.sleep(10)
+            else:
+                break
+
+    def add_default_flows(self, datapath):
+        '''
+        Adds default unknown flows to the controller
+        '''
+
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+        self.add_flow(datapath, 1, match, actions)
+
+        # Installing the flow rules to send latency probe packets
+        match = parser.OFPMatch(eth_type=self.PROBE_ETHERTYPE)
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
+        self.add_flow(datapath, self.PRIORITY_PROBE_PACKETS, match, actions)
+
+    def add_default_for_all(self):
+        for dpid, s in self.topo_shape.dpid_to_switch:
+            self.add_default_flows(s.dp)
+
+    def stop_monitoring(self):
+        self.keep_monitoring = False
+
+
 
     ##########################################
     #      NETWORK DISCOVERY HANDLERS        #
@@ -146,17 +193,8 @@ class MultipathController(app_manager.RyuApp):
         Switch features handler callback
         '''
         self.logger.debug('EventOFPSwitchFeatures')
-        datapath = ev.msg.datapath
-        ofproto = datapath.ofproto
-        parser = datapath.ofproto_parser
-        match = parser.OFPMatch()
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
-        self.add_flow(datapath, 0, match, actions)
+        self.add_default_flows(ev.msg.datapath)
 
-        # Installing the flow rules to send latency probe packets
-        match = parser.OFPMatch(eth_type=self.PROBE_ETHERTYPE)
-        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER)]
-        self.add_flow(datapath, 65000, match, actions)
 
     @set_ev_cls(event.EventSwitchEnter, MAIN_DISPATCHER)
     def switch_enter_handler(self, event):
@@ -165,20 +203,26 @@ class MultipathController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventSwitchLeave, MAIN_DISPATCHER)
     def switch_leave_handler(self, event):
-        self.logger.info('EventSwitchLeave')
-        self.topo_shape.remove_switch(event.switch)
+        self.logger.debug('EventSwitchLeave')
+
+        # Redundant for Mininet emulated network since
+        # you cannot remove switches/link once the topology
+        # has started
+
+        # self.topo_shape.remove_switch(event.switch)
 
     @set_ev_cls(event.EventLinkAdd, MAIN_DISPATCHER)
     def link_add_handler(self, event):
         self.logger.info('EventLinkAdd')
         self.topo_shape.add_link(event)
 
-    
     @set_ev_cls(event.EventLinkDelete, MAIN_DISPATCHER)
     def link_delete_handler(self, event):
-        self.logger.info('EventLinkDelete %s' % event)
-        # It seems to be called at the wrong moment for a bug
-        # in ryu topology discovery module
+        self.logger.debug('EventLinkDelete %s' % event)
+        # Redundant for Mininet emulated network since
+        # you cannot remove switches/link once the topology
+        # has started
+
         # self.topo_shape.remove_link(event)
 
     @set_ev_cls(event.EventPortAdd, MAIN_DISPATCHER)
@@ -188,8 +232,13 @@ class MultipathController(app_manager.RyuApp):
 
     @set_ev_cls(event.EventPortDelete, MAIN_DISPATCHER)
     def port_delete_handler(self, event):
-        self.logger.info('EventPortDelete')
-        self.topo_shape.remove_port(event.port)
+        self.logger.debug('EventPortDelete')
+
+        # Redundant for Mininet emulated network since
+        # you cannot remove switches/link once the topology
+        # has started
+
+        # self.topo_shape.remove_port(event.port)
 
     ##########################################
     #              NETWORK MONITORING        #
@@ -203,29 +252,35 @@ class MultipathController(app_manager.RyuApp):
         # in a state where the network will be idle.
         self.benchmark_network_capacity()
 
+        self.keep_monitoring = True
         # Then we start the periodic measurement of RTT times and port
         # utilization
 
         counter = 0
-        while True:
+        while self.keep_monitoring:
             if not self.topo_shape.is_empty():
-                self.logger.info('Requesting port stats to '
-                                 'measure utilization')
+                self.logger.debug('Requesting port stats to '
+                                  'measure utilization')
+                self.logger.info('\n------------------')
                 for dpid, s in self.topo_shape.dpid_to_switch.iteritems():
 
                     s.port_stats_request_time = time.time()
 
                     # Requesting portstats to calculate controller
                     # to switch delay and congeston
+                    # if self.MONITORING_PORT_STATS:
                     self._request_port_stats(s)
 
                     # Calculating peering switches RTT (once every 10 portstats
                     # so ~10 secs)
-                    if counter % 10 == 0:
+                    if counter % 30 == 0:
                         self.send_latency_probe_packet(s)
+
                 counter += 1
 
-            hub.sleep(1)
+            hub.sleep(self.MONITORING_PORT_STATS_FREQUENCY)
+
+        self.logger.info('Stopping monitor')
 
     def benchmark_network_capacity(self):
         '''
@@ -320,9 +375,13 @@ class MultipathController(app_manager.RyuApp):
 
                 utilization_bps = datadelta / timedelta
                 port.capacity = port.max_capacity - utilization_bps
-                self.logger.debug('p %d s %s utilization %f real_capacity %f',
-                                  stat.port_no, switch, datadelta, port.capacity)
 
+                self.logger.info(
+                    's[%s] p[%d] utilization %2.f max_capacity %s',
+                    switch.dp.id, stat.port_no,
+                    utilization_bps,
+                    port.max_capacity
+                )
             port.last_request_time = port_stats_reply_time
             port.last_utilization_value = utilization
 
@@ -490,7 +549,24 @@ class MultipathRestController(ControllerBase):
             port_no = int(kwargs['port_no'])
             weight = int(kwargs['weight'])
             multipath_controller.topo_shape.dpid_to_switch[
-                dp_id].ports[port_no].max_capacity = weight
+                dp_id].ports[port_no].set_max_capacity(weight)
+        except:
+            traceback.print_exc()
+            return Response(content_type='text/html', body='Failure!\n')
+
+        return Response(content_type='text/html', body='Success !\n')
+
+    @route('multipath',
+           '/multipath/set_edge_port/{dp_id}/{port_no}',
+           methods=['GET'])
+    def set_edge_port(self, req, **kwargs):
+        multipath_controller = self.mp_instance
+
+        try:
+            dp_id = int(kwargs['dp_id'])
+            port_no = int(kwargs['port_no'])
+            multipath_controller.topo_shape.dpid_to_switch[
+                dp_id].edge_port = port_no
         except:
             traceback.print_exc()
             return Response(content_type='text/html', body='Failure!\n')
@@ -524,21 +600,48 @@ class MultipathRestController(ControllerBase):
         return Response(content_type='text/html',
                         body='Path computation started!\n')
 
+    @route('multipath', '/multipath/recompute_multipath', methods=['GET'])
+    def start_path_recomputation(self, req, **kwargs):
+        multipath_controller = self.mp_instance
+
+        hub.spawn_after(
+            1,
+            multipath_controller.multipath_computation
+        )
+
+
+        return Response(content_type='text/html',
+                        body='Path recomputatation started!\n')
+
     @route('multipath', '/multipath/configuration', methods=['POST'])
     def configure_controller_parameters(self, req, **kwargs):
         multipath_controller = self.mp_instance
 
         config = json.loads(req.body)
-        multipath_controller.MDI_REORDERING_THRESHOLD = float(
-            config['mdi_reordering']
-        )
-        multipath_controller.MDI_DROP_THRESHOLD = float(
-            config['mdi_drop']
-        )
-        multipath_controller.MIN_MULTIPATH_CAPACITY = int(config['max_paths'])
-        multipath_controller.MAX_PATHS_PER_MULTIPATH_FLOW = int(
-            config['min_multipath_capacity']
-        )
+
+        if 'max_hop_difference' in config.keys():
+            multipath_controller.MAX_HOP_DIFFERENCE = config['max_hop_difference']
+        if 'mdi_reordering' in config.keys():
+            multipath_controller.MDI_REORDERING_THRESHOLD = float(
+                config['mdi_reordering']
+            )
+        if 'mdi_drop' in config.keys():
+            multipath_controller.MDI_DROP_THRESHOLD = float(
+                config['mdi_drop']
+            )
+        if 'max_paths' in config.keys():
+            multipath_controller.MAX_PATHS_PER_MULTIPATH_FLOW = int(
+                config['max_paths']
+            )
+        if 'min_multipath_capacity' in config.keys():
+            multipath_controller.MIN_MULTIPATH_CAPACITY = int(
+                config['min_multipath_capacity']
+            )
+
+        if 'monitoring_frequency_seconds' in config.keys():
+            multipath_controller.MONITORING_PORT_STATS_FREQUENCY = int(
+                config['monitoring_frequency_seconds']
+            )
 
         return Response(content_type='text/html',
                         body='Configuration accepted\n')
@@ -558,7 +661,6 @@ class MultipathRestController(ControllerBase):
             dp_id = kwargs['dp_id']
             group_id = kwargs['group_id']
             arg_rules = kwargs['rules']
-            print arg_rules
             rules = {}
             for i in arg_rules.split(';'):
                 rules[int(i.split(',')[0])] = int(i.split(',')[1])

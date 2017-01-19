@@ -30,11 +30,11 @@ class Port(switches.Port):
         self.peer_port_no = None
 
         # Delay cost
-        self.latency = float('inf')
+        self.latency = 0.001
 
         # Max capacity cost Bytes/s
-        # Setting here a upper limit of 100Mb/s
-        self.max_capacity = 104857600
+        # Setting here a default upper limit of 200Mb/s
+        self.max_capacity = 25000000
 
         # Real capacity
         self.capacity = self.max_capacity
@@ -91,6 +91,11 @@ class Port(switches.Port):
         max-flow algorithm
         '''
         self.capacity_maxflow = self.capacity
+
+    def set_max_capacity(self, capacity):
+        self.max_capacity = capacity
+        self.capacity = capacity
+        self.capacity_maxflow = capacity
 
     def __repr__(self):
         return 'Port<no=%d capacity_maxflow=%f latency=%f>' % (
