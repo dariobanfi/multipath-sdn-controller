@@ -19,7 +19,7 @@ It uses the network knowledge to compute multiple paths and push the resulting c
 This component is used to do real-time measurements of the network. The con- troller keeps an estimate of the latency and bandwidth of the multiple paths that connect the SDN switches of the multipath topology. This data is used by the multipath routing component to compute forwarding tables which maximize the throughput between the nodes.
 
 ## Demo 
-Check out an visualization of the network benefits over here:
+Check out a visualization of the network benefits over here:
 [https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be](https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be)
 
 
