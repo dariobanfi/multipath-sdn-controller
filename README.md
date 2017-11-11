@@ -22,4 +22,4 @@ This component is used to do real-time measurements of the network. The con- tro
 Check out a visualization of the network benefits over here:
 [https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be](https://www.youtube.com/watch?v=hkgf7l9Lshw&feature=youtu.be)
 
-
+To run the demo make sure to install the dependencies with pip (like `bottle`, `ryu`, etc) and to provide a video file to be streamed
